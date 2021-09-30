@@ -7,8 +7,37 @@
         {
             "type": "lldb",
             "request": "launch",
-            "name": "Debug",
-            "program": "${workspaceFolder}/<your program>",
+            "name": "Debug executable 'rust-multiplexing-stream'",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--bin=rust-multiplexing-stream",
+                    "--package=rust-multiplexing-stream"
+                ],
+                "filter": {
+                    "name": "rust-multiplexing-stream",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in executable 'rust-multiplexing-stream'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--bin=rust-multiplexing-stream",
+                    "--package=rust-multiplexing-stream"
+                ],
+                "filter": {
+                    "name": "rust-multiplexing-stream",
+                    "kind": "bin"
+                }
+            },
             "args": [],
             "cwd": "${workspaceFolder}"
         }

@@ -1,5 +1,5 @@
 [package]
-name = "ig-front-end"
+name = "rust-multiplexing-stream"
 version = "0.1.0"
 authors = ["Irek Nigmatullin <nigma143@mail.ru>"]
 edition = "2018"

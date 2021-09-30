@@ -96,10 +96,27 @@ pub async fn write_frame<W: AsyncWriteExt + Unpin>(mut write: W, value: Frame) -
 pub async fn read_frame<R: AsyncReadExt + Unpin>(mut read: R) -> Result<Frame> {
     let mut buf = [0; 1];
     read.read_exact(&mut buf).await?;
-    
+
     let mut buf = vec![0; buf[0] as usize];
 
     read.read_exact(&mut buf).await?;
+
+    Ok(buf.into())
+}
+
+pub fn sync_write_frame<W: Write>(mut write: W, value: Frame) -> Result<()> {
+    let buf: Vec<u8> = value.into();
+    write.write_all(&vec![buf.len() as u8; 1])?;
+    write.write_all(&buf)
+}
+
+pub fn sync_read_frame<R: Read>(mut read: R) -> Result<Frame> {
+    let mut buf = [0; 1];
+    read.read_exact(&mut buf)?;
+
+    let mut buf = vec![0; buf[0] as usize];
+
+    read.read_exact(&mut buf);
 
     Ok(buf.into())
 }
