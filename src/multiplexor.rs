@@ -82,6 +82,14 @@ impl Multiplexor {
             .await
             .unwrap();
 
+        self.message_tx
+            .send(Frame::OfferAccepted {
+                s_id: 1,
+                window_size: None,
+            })
+            .await
+            .unwrap();
+
         Ok((Writer::new(write_tx), Reader::new(incoming.rx)))
     }
 
@@ -94,9 +102,9 @@ impl Multiplexor {
             })
             .await
             .unwrap();
-
+            
         let outcoming = self.outcoming.recv().await.unwrap();
-
+        
         let (write_tx, write_rx) = channel::unbounded();
 
         self.in_writer_tx
@@ -129,7 +137,7 @@ fn write_loop<W: Write>(
             }
         }
 
-        if in_writer_rx.is_empty() {
+        if !in_writer_rx.is_empty() {
             match in_writer_rx.try_recv() {
                 Ok(o) => {
                     writers.push(o);
@@ -137,16 +145,17 @@ fn write_loop<W: Write>(
                 Err(e) => println!("Incoimng writer channel is die. {}", e),
             }
         }
-
+       
         for i in 0..writers.len() {
             let item = writers.get(i).unwrap();
             if !item.rx.is_empty() {
+                println!("{}", item.rx.len());
                 match item.rx.try_recv() {
                     Ok(o) => {
                         let frame = Frame::Content {
                             s_id: item.s_id,
                             payload: o,
-                        };
+                        };                        
                         sync_write_frame(&mut write, frame.into())?;
                     }
                     Err(e) => {
@@ -187,7 +196,7 @@ fn read_loop<R: Read>(
                 window_size,
             } => {
                 let (tx, rx) = channel::unbounded();
-                map.insert(s_id, tx).unwrap();
+                map.insert(s_id, tx);
 
                 incoming
                     .try_send(Incoming {
@@ -200,7 +209,7 @@ fn read_loop<R: Read>(
             }
             Frame::OfferAccepted { s_id, window_size } => {
                 let (tx, rx) = channel::unbounded();
-                map.insert(s_id, tx).unwrap();
+                map.insert(s_id, tx);
 
                 outcoming
                     .try_send(Outcoming {

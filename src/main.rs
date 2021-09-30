@@ -140,9 +140,28 @@ fn main() -> io::Result<()> {
         let s_w = Writer::new(s_tx);
 
         task::spawn(async move {
-            let c_w = Writer::new(c_tx);
-            let mux = Multiplexor::new(c_r, c_w);
+            let mut mux = Multiplexor::new(c_r, s_w);
+            let (mut writer, mut reader) = mux.offer().await.unwrap();
+            
+            AsyncWriteExt::write_all(&mut writer, &[1, 2, 3, 6]).await.unwrap();
+            task::sleep(Duration::from_secs(100)).await;
         });
+
+        let mut mux = Multiplexor::new(s_r, c_w);
+
+        loop {
+            let (mut writer, mut reader) = mux.listen().await.unwrap();
+            println!("incoming stream");
+
+            task::spawn(async move {
+                let mut buf = [1; 1];
+                AsyncReadExt::read_exact(&mut reader, &mut buf).await.unwrap();
+                println!("Server in: {:?}", buf);
+
+            });
+        }
+
+        
 
         Ok(())
     })
