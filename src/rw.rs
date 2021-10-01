@@ -100,7 +100,7 @@ impl<T: Clone> Writer<T> {
         self.input.send(buf.to_vec()).await
     }
 
-    async fn write_wrap(&mut self, buf: &[T]) -> std::io::Result<usize> {        
+    async fn write_wrap(&mut self, buf: &[T]) -> std::io::Result<usize> {
         let res = self.send(buf.to_vec()).await;
         match res {
             Ok(_) => Ok(buf.len()),
@@ -116,7 +116,7 @@ impl AsyncWrite for Writer<u8> {
         buf: &[u8],
     ) -> task::Poll<std::io::Result<usize>> {
         let this = unsafe { std::pin::Pin::into_inner_unchecked(self) };
-        
+
         if this.fut.is_none() {
             let fut: BoxFuture<std::io::Result<usize>> = this.write_wrap(buf).boxed();
             let fut: BoxFuture<'static, std::io::Result<usize>> =
