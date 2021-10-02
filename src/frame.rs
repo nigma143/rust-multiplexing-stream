@@ -7,7 +7,7 @@ use std::{
 
 use futures::{AsyncReadExt, AsyncWriteExt};
 
-pub type StreamId = u32;
+pub type StreamId = u64;
 
 pub enum Frame {
     Offer {
@@ -30,93 +30,137 @@ pub enum Frame {
     //ContentProcessed,
 }
 
-impl Into<Vec<u8>> for Frame {
-    fn into(self) -> Vec<u8> {
-        match self {
-            Frame::Offer {
-                s_id,
-                name,
-                window_size,
-            } => {
-                let mut buf = vec![0x01];
-                buf.extend(&s_id.to_be_bytes());
-                buf.extend(name.as_bytes());
-                buf
-            }
-            Frame::OfferAccepted { s_id, window_size } => {
-                let mut buf = vec![0x02];
-                buf.extend(&s_id.to_be_bytes());
-                buf
-            }
-            Frame::Content { s_id, payload } => {
-                let mut buf = vec![0x03];
-                buf.extend(&s_id.to_be_bytes());
-                buf.extend(payload);
-                buf
-            }
-            Frame::ContentWritingCompleted { s_id } => {
-                let mut buf = vec![0x02];
-                buf.extend(&s_id.to_be_bytes());
-                buf
-            }
-        }
-    }
-}
-
-impl From<Vec<u8>> for Frame {
-    fn from(buf: Vec<u8>) -> Self {
-        match buf[0] {
-            0x01 => Self::Offer {
-                s_id: u32::from_be_bytes(buf[1..5].try_into().unwrap()),
-                name: String::from_utf8(buf[5..].try_into().unwrap()).unwrap(),
-                window_size: None,
-            },
-            0x02 => Self::OfferAccepted {
-                s_id: u32::from_be_bytes(buf[1..5].try_into().unwrap()),
-                window_size: None,
-            },
-            0x03 => Self::Content {
-                s_id: u32::from_be_bytes(buf[1..5].try_into().unwrap()),
-                payload: buf[5..].try_into().unwrap(),
-            },
-            0x04 => Self::ContentWritingCompleted {
-                s_id: u32::from_be_bytes(buf[1..5].try_into().unwrap()),
-            },
-            _ => panic!("dsfds"),
-        }
-    }
-}
-
-pub async fn write_frame<W: AsyncWriteExt + Unpin>(mut write: W, value: Frame) -> Result<()> {
-    let buf: Vec<u8> = value.into();
-    write.write_all(&vec![buf.len() as u8; 1]).await?;
-    write.write_all(&buf).await
-}
-
-pub async fn read_frame<R: AsyncReadExt + Unpin>(mut read: R) -> Result<Frame> {
-    let mut buf = [0; 1];
-    read.read_exact(&mut buf).await?;
-
-    let mut buf = vec![0; buf[0] as usize];
-
-    read.read_exact(&mut buf).await?;
-
-    Ok(buf.into())
-}
-
 pub fn sync_write_frame<W: Write>(mut write: W, value: Frame) -> Result<()> {
-    let buf: Vec<u8> = value.into();
-    write.write_all(&vec![buf.len() as u8; 1])?;
-    write.write_all(&buf)
+    match value {
+        Frame::Offer {
+            s_id,
+            name,
+            window_size,
+        } => {
+            rmp::encode::write_array_len(&mut write, 4)?;
+            rmp::encode::write_i32(&mut write, 1)?;
+            rmp::encode::write_u64(&mut write, s_id)?;
+            rmp::encode::write_i8(&mut write, 1)?;
+            match window_size {
+                Some(s) => {
+                    rmp::encode::write_array_len(&mut write, 2)?;
+                    rmp::encode::write_str(&mut write, &name)?;
+                    rmp::encode::write_u64(&mut write, s)?;
+                },
+                None => {
+                    rmp::encode::write_array_len(&mut write, 1)?;
+                    rmp::encode::write_str(&mut write, &name)?;
+                },
+            }
+        }
+        Frame::OfferAccepted { s_id, window_size } => {
+            rmp::encode::write_array_len(&mut write, 4)?;
+            rmp::encode::write_i32(&mut write, 2)?;
+            rmp::encode::write_u64(&mut write, s_id)?;
+            rmp::encode::write_i8(&mut write, 1)?;
+            match window_size {
+                Some(s) => {
+                    rmp::encode::write_array_len(&mut write, 1)?;
+                    rmp::encode::write_u64(&mut write, s)?;
+                },
+                None => {
+                    rmp::encode::write_array_len(&mut write, 0)?;
+                },
+            }
+        }
+        Frame::Content { s_id, payload } => {
+            rmp::encode::write_array_len(&mut write, 4)?;
+            rmp::encode::write_i32(&mut write, 3)?;
+            rmp::encode::write_u64(&mut write, s_id)?;
+            rmp::encode::write_i8(&mut write, 1)?;
+            rmp::encode::write_bin(&mut write, &payload[..])?;
+        }
+        Frame::ContentWritingCompleted { s_id } => {
+            rmp::encode::write_array_len(&mut write, 3)?;
+            rmp::encode::write_i32(&mut write, 4)?;
+            rmp::encode::write_u64(&mut write, s_id)?;
+            rmp::encode::write_i8(&mut write, 1)?;
+        }
+    }
+
+    Ok(())
 }
 
 pub fn sync_read_frame<R: Read>(mut read: R) -> Result<Frame> {
-    let mut buf = [0; 1];
+    let components = rmp::decode::read_array_len(&mut read).unwrap();
+    let code = rmp::decode::read_i32(&mut read).unwrap();
+
+    let frame = match code {
+        1 => {
+            let s_id = rmp::decode::read_u64(&mut read).unwrap();
+            let source = rmp::decode::read_i8(&mut read).unwrap();
+            let offer_param_len = rmp::decode::read_array_len(&mut read).unwrap();
+
+            let mut buf = vec![0; 128];            
+            let name = rmp::decode::read_str(&mut read, &mut buf).unwrap().into();
+
+            let window_size = if offer_param_len == 2 {
+                Some(rmp::decode::read_u64(&mut read).unwrap())
+            } else {
+                None
+            };
+
+            Frame::Offer {
+                s_id,
+                name,
+                window_size
+            }
+        },
+        2 => {
+            let s_id = rmp::decode::read_u64(&mut read).unwrap();
+            let source = rmp::decode::read_i8(&mut read).unwrap();
+            let offer_param_len = rmp::decode::read_array_len(&mut read).unwrap();
+            let window_size = if offer_param_len == 1 {
+                Some(rmp::decode::read_u64(&mut read).unwrap())
+            } else {
+                None
+            };
+
+            Frame::OfferAccepted {
+                s_id,
+                window_size
+            }
+        },
+        3 => {
+            let s_id = rmp::decode::read_u64(&mut read).unwrap();
+            let source = rmp::decode::read_i8(&mut read).unwrap();
+            let payload_len = rmp::decode::read_bin_len(&mut read).unwrap() as usize;
+
+            let mut payload: Vec<u8> = Vec::with_capacity(payload_len);
+            unsafe { payload.set_len(payload_len); }
+
+            read.read_exact(&mut payload)?;
+
+            Frame::Content {
+                s_id,
+                payload
+            }
+        },
+        4 => {
+            let s_id = rmp::decode::read_u64(&mut read).unwrap();
+            let source = rmp::decode::read_i8(&mut read).unwrap();
+            
+            Frame::ContentWritingCompleted {
+                s_id
+            }
+        },
+
+        _ => todo!()
+    };
+
+    Ok(frame)
+    
+    /*let mut buf = [0; 1];
     read.read_exact(&mut buf)?;
 
     let mut buf = vec![0; buf[0] as usize];
 
     read.read_exact(&mut buf);
 
-    Ok(buf.into())
+    Ok(buf.into())*/
 }

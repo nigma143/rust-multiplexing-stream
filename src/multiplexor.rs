@@ -12,7 +12,7 @@ use async_std::{
 use futures::{channel::oneshot, future::BoxFuture, AsyncReadExt, Future, FutureExt};
 
 use crate::{
-    frame::{read_frame, sync_read_frame, sync_write_frame, Frame, StreamId},
+    frame::{sync_read_frame, sync_write_frame, Frame, StreamId},
     rw::{Reader, Writer},
 };
 

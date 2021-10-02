@@ -10,3 +10,4 @@ edition = "2018"
 futures = { version = "0.3.*" }
 async-std = "1.*"
 triggered = "0.1.2"
+rmp = "0.8.10"
