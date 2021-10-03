@@ -5,36 +5,13 @@ use std::{
     thread::{self, JoinHandle},
 };
 
-use async_std::{
-    channel::{self, Receiver, Sender},
-    task::{self},
-};
 use futures::{channel::oneshot, future::BoxFuture, AsyncReadExt, Future, FutureExt};
+use tokio::sync::mpsc::{self, Receiver, Sender};
 
 use crate::{
     frame::{sync_read_frame, sync_write_frame, Frame, StreamId},
     rw::{Reader, Writer},
 };
-
-type StreamMaps = Arc<Mutex<HashMap<StreamId, StreamState>>>;
-
-type WriterMaps = Arc<Mutex<HashMap<StreamId, Receiver<Vec<u8>>>>>;
-
-type OfferAwaiter = Arc<Mutex<Option<oneshot::Sender<Offered>>>>;
-
-type AcceptOfferAwaiters = Arc<Mutex<HashMap<StreamId, oneshot::Sender<Outcoming>>>>;
-
-struct Offered {
-    s_id: StreamId,
-    name: String,
-    reader: Receiver<Vec<u8>>,
-    window_size: Option<u64>,
-}
-
-enum StreamState {
-    Awaiting(oneshot::Sender<Offered>),
-    Ready(Sender<Vec<u8>>),
-}
 
 pub struct Multiplexor {
     read_handler: JoinHandle<Result<(), Error>>,
@@ -50,12 +27,12 @@ pub struct Multiplexor {
 
 impl Multiplexor {
     pub fn new<R: Read + Send + 'static, W: Write + Send + 'static>(read: R, write: W) -> Self {
-        let (incoming_tx, incoming_rx) = channel::unbounded();
-        let (outcoming_tx, outcoming_rx) = channel::unbounded();
+        let (incoming_tx, incoming_rx) = mpsc::channel(1024);
+        let (outcoming_tx, outcoming_rx) = mpsc::channel(1024);
         let read_handler = thread::spawn(move || read_loop(read, incoming_tx, outcoming_rx));
 
-        let (in_writer_tx, in_writer_rx) = channel::unbounded();
-        let (message_tx, message_rx) = channel::unbounded();
+        let (in_writer_tx, in_writer_rx) = mpsc::channel(1024);
+        let (message_tx, message_rx) = mpsc::channel(1024);
         let write_handler = thread::spawn(move || write_loop(write, message_rx, in_writer_rx));
 
         Self {
@@ -71,7 +48,7 @@ impl Multiplexor {
     pub async fn listen(&mut self) -> Result<(String, Writer<u8>, Reader<u8>), Error> {
         let incoming = self.incoming.recv().await.unwrap();
 
-        let (write_tx, write_rx) = channel::unbounded();
+        let (write_tx, write_rx) = mpsc::channel(1024);
 
         self.in_writer_tx
             .send(Incoming {
@@ -80,16 +57,14 @@ impl Multiplexor {
                 rx: write_rx,
                 window_size: incoming.window_size,
             })
-            .await
-            .unwrap();
+            .await;
 
         self.message_tx
             .send(Frame::OfferAccepted {
                 s_id: 1,
                 window_size: None,
             })
-            .await
-            .unwrap();
+            .await;
 
         Ok((incoming.name, Writer::new(write_tx), Reader::new(incoming.rx)))
     }
@@ -97,7 +72,7 @@ impl Multiplexor {
     pub async fn offer(&mut self, name: impl Into<String>) -> Result<(Writer<u8>, Reader<u8>), Error> {
         let (outcoming_t, outcoming_r) = oneshot::channel();
 
-        self.outcoming.send((1, outcoming_t)).await.unwrap();
+        self.outcoming.send((1, outcoming_t)).await;
 
         self.message_tx
             .send(Frame::Offer {
@@ -105,12 +80,11 @@ impl Multiplexor {
                 name: name.into(),
                 window_size: None,
             })
-            .await
-            .unwrap();
+            .await;
 
         let outcoming = outcoming_r.await.unwrap();
 
-        let (write_tx, write_rx) = channel::unbounded();
+        let (write_tx, write_rx) = mpsc::channel(1024);
 
         self.in_writer_tx
             .send(Incoming {
@@ -119,8 +93,7 @@ impl Multiplexor {
                 rx: write_rx,
                 window_size: outcoming.window_size,
             })
-            .await
-            .unwrap();
+            .await;
 
         Ok((Writer::new(write_tx), Reader::new(outcoming.rx)))
     }
@@ -128,35 +101,55 @@ impl Multiplexor {
 
 fn write_loop<W: Write>(
     mut write: W,
-    message_rx: Receiver<Frame>,
-    in_writer_rx: Receiver<Incoming>,
+    mut message_rx: Receiver<Frame>,
+    mut in_writer_rx: Receiver<Incoming>,
 ) -> std::io::Result<()> {
     let mut writers = Vec::new();
     loop {
-        if !message_rx.is_empty() {
-            let msg = message_rx.try_recv().unwrap();
-            sync_write_frame(&mut write, msg.into())?;
-        }
-        if !in_writer_rx.is_empty() {
-            let writer = in_writer_rx.try_recv().unwrap();
-            writers.push(writer);
-        }
-        for i in 0..writers.len() {
-            let item = writers.get(i).unwrap();
-            if !item.rx.is_empty() {
-                match item.rx.try_recv() {
-                    Ok(o) => {
-                        let frame = Frame::Content {
-                            s_id: item.s_id,
-                            payload: o,
-                        };
-                        sync_write_frame(&mut write, frame.into())?;
-                    }
-                    Err(e) => {
-                        println!("Writer `{}` is die. {}", item.s_id, e);
-                        writers.remove(i);
-                    }
+        match message_rx.try_recv() {
+            Ok(msg) => sync_write_frame(&mut write, msg.into())?,
+            Err(e) => {
+                match e {
+                    mpsc::error::TryRecvError::Empty => {},
+                    mpsc::error::TryRecvError::Disconnected => 
+                    return Err(Error::new(ErrorKind::Other, "channel is closed".to_owned())),
                 }
+            },
+        }
+
+        match in_writer_rx.try_recv() {
+            Ok(writer) => {
+                writers.push(writer);   
+            },
+            Err(e) => {
+                match e {
+                    mpsc::error::TryRecvError::Empty => {},
+                    mpsc::error::TryRecvError::Disconnected => 
+                    return Err(Error::new(ErrorKind::Other, "channel is closed".to_owned())),
+                }
+            },
+        }
+
+        for i in 0..writers.len() {
+            let item = writers.get_mut(i).unwrap();
+
+            match item.rx.try_recv() {
+                Ok(msg) => {
+                    let frame = Frame::Content {
+                        s_id: item.s_id,
+                        payload: msg,
+                    };
+                    sync_write_frame(&mut write, frame.into())?;  
+                },
+                Err(e) => {
+                    match e {
+                        mpsc::error::TryRecvError::Empty => {},
+                        mpsc::error::TryRecvError::Disconnected => {
+                            println!("Writer `{}` is die. {}", item.s_id, e);
+                            writers.remove(i);
+                        },
+                    }
+                },
             }
         }
     }
@@ -177,8 +170,8 @@ struct Outcoming {
 
 fn read_loop<R: Read>(
     mut read: R,
-    incoming: Sender<Incoming>,
-    outcoming: Receiver<(StreamId, oneshot::Sender<Outcoming>)>,
+    mut incoming: Sender<Incoming>,
+    mut outcoming: Receiver<(StreamId, oneshot::Sender<Outcoming>)>,
 ) -> std::io::Result<()> {
     let mut map = HashMap::new();
     let mut awaiter_map = HashMap::<StreamId, oneshot::Sender<Outcoming>>::new();
@@ -190,7 +183,7 @@ fn read_loop<R: Read>(
                 name,
                 window_size,
             } => {
-                let (tx, rx) = channel::unbounded();
+                let (tx, rx) = mpsc::channel(1024);
                 map.insert(s_id, tx);
                 incoming
                     .try_send(Incoming {
@@ -198,23 +191,34 @@ fn read_loop<R: Read>(
                         name,
                         rx: rx,
                         window_size,
-                    })
-                    .unwrap();
+                    });
             }
             Frame::OfferAccepted { s_id, window_size } => {
-                let (tx, rx) = channel::unbounded();
+                let (tx, rx) = mpsc::channel(1024);
                 let s = match awaiter_map.remove(&s_id) {
                     Some(s) => Some(s),
                     None => {
                         let mut r = None;
-                        while !outcoming.is_empty() {
-                            let (a_s_id, sender) = outcoming.try_recv().unwrap();
-                            if a_s_id == s_id {
-                                r = Some(sender);
-                                break;
+
+                        loop {
+                            match outcoming.try_recv() {
+                                Ok((a_s_id, sender)) => {
+                                    if a_s_id == s_id {
+                                        r = Some(sender);
+                                        break;
+                                    }
+                                    awaiter_map.insert(a_s_id, sender);
+                                },
+                                Err(e) => {
+                                    match e {
+                                        mpsc::error::TryRecvError::Empty => break,
+                                        mpsc::error::TryRecvError::Disconnected => 
+                                        return Err(Error::new(ErrorKind::Other, "channel is closed".to_owned())),
+                                    }
+                                },
                             }
-                            awaiter_map.insert(a_s_id, sender);
                         }
+
                         r
                     }
                 };
@@ -239,5 +243,11 @@ fn read_loop<R: Read>(
             },
             Frame::ContentWritingCompleted { s_id } => todo!(),
         }
+    }
+}
+
+impl From<Frame> for std::io::Error {
+    fn from(_: Frame) -> Self {
+        todo!()
     }
 }

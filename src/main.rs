@@ -15,14 +15,6 @@ use std::{
     time::Duration,
 };
 
-use async_std::{
-    fs::File,
-    future,
-    prelude::*,
-    task::{self, sleep},
-};
-use async_std::{stream, sync::Mutex};
-
 use futures::{
     channel::{
         mpsc::UnboundedReceiver,
@@ -39,8 +31,9 @@ mod frame;
 mod multiplexor;
 mod rw;
 
-fn main() -> io::Result<()> {
-    task::block_on(async {
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+
         //let (in_tx, in_rx) = channel::unbounded();
         //let (out_tx, out_rx) = channel::unbounded();
         /*
@@ -139,14 +132,14 @@ fn main() -> io::Result<()> {
         let s_r = Reader::new(s_rx);
         let s_w = Writer::new(s_tx);
 
-        task::spawn(async move {
+        tokio::spawn(async move {
             let mut mux = Multiplexor::new(c_r, s_w);
             let (mut writer, mut reader) = mux.offer("Common").await.unwrap();
 
             AsyncWriteExt::write_all(&mut writer, &[1, 2, 3, 6])
                 .await
                 .unwrap();
-            task::sleep(Duration::from_secs(100)).await;
+                tokio::time::sleep(Duration::from_secs(100)).await;
         });
 
         let mut mux = Multiplexor::new(s_r, c_w);
@@ -155,7 +148,7 @@ fn main() -> io::Result<()> {
             let (name, mut writer, mut reader) = mux.listen().await.unwrap();
             println!("incoming stream: {}", name);
 
-            task::spawn(async move {
+            tokio::spawn(async move {
                 let mut buf = [1; 1];
                 AsyncReadExt::read_exact(&mut reader, &mut buf)
                     .await
@@ -165,7 +158,6 @@ fn main() -> io::Result<()> {
         }
 
         Ok(())
-    })
 }
 
 pub struct Reader<T> {

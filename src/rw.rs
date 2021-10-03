@@ -1,7 +1,7 @@
 use std::{io::Error, io::ErrorKind};
 
-use async_std::channel::{Receiver, RecvError, SendError, Sender};
 use futures::{future::BoxFuture, task, AsyncRead, AsyncWrite, FutureExt};
+use tokio::sync::mpsc::{Receiver, Sender, error::SendError};
 
 pub struct Reader<T> {
     output: Receiver<Vec<T>>,
@@ -18,11 +18,11 @@ impl<T: Clone + Copy> Reader<T> {
         }
     }
 
-    pub async fn recv(&mut self) -> Result<Vec<T>, RecvError> {
+    pub async fn recv(&mut self) -> Option<Vec<T>> {
         if !self.output_buf.is_empty() {
             let buf = self.output_buf.clone();
             self.output_buf.clear();
-            return Ok(buf);
+            return Some(buf);
         }
 
         self.output.recv().await
@@ -44,7 +44,7 @@ impl<T: Clone + Copy> Reader<T> {
 
         let res = self.recv().await;
         match res {
-            Ok(received) => {
+            Some(received) => {
                 if received.len() <= buf.len() {
                     buf[0..received.len()].copy_from_slice(&received);
 
@@ -56,7 +56,7 @@ impl<T: Clone + Copy> Reader<T> {
                     Ok(buf.len()) //
                 }
             }
-            Err(e) => Err(Error::new(ErrorKind::Other, e)),
+            Nnoe => Err(Error::new(ErrorKind::Other, "channel is closed".to_owned())),
         }
     }
 }
@@ -140,13 +140,7 @@ impl AsyncWrite for Writer<u8> {
         task::Poll::Ready(Ok(()))
     }
 
-    fn poll_close(
-        self: std::pin::Pin<&mut Self>,
-        _: &mut task::Context<'_>,
-    ) -> task::Poll<std::io::Result<()>> {
-        task::Poll::Ready(match self.input.close() {
-            true => Ok(()),
-            false => Err(Error::new(ErrorKind::Other, "can't close channel")),
-        })
+    fn poll_close(self: std::pin::Pin<&mut Self>, cx: &mut task::Context<'_>) -> task::Poll<std::io::Result<()>> {
+        task::Poll::Ready(Ok(()))
     }
 }
