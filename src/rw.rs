@@ -1,7 +1,7 @@
 use std::{io::Error, io::ErrorKind};
 
 use futures::{future::BoxFuture, task, AsyncRead, AsyncWrite, FutureExt};
-use tokio::sync::mpsc::{Receiver, Sender, error::SendError};
+use tokio::sync::mpsc::{error::SendError, Receiver, Sender};
 
 pub struct Reader<T> {
     output: Receiver<Vec<T>>,
@@ -56,7 +56,7 @@ impl<T: Clone + Copy> Reader<T> {
                     Ok(buf.len()) //
                 }
             }
-            Nnoe => Err(Error::new(ErrorKind::Other, "channel is closed".to_owned())),
+            None => Err(Error::new(ErrorKind::Other, "channel is closed".to_owned())),
         }
     }
 }
@@ -140,7 +140,10 @@ impl AsyncWrite for Writer<u8> {
         task::Poll::Ready(Ok(()))
     }
 
-    fn poll_close(self: std::pin::Pin<&mut Self>, cx: &mut task::Context<'_>) -> task::Poll<std::io::Result<()>> {
+    fn poll_close(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut task::Context<'_>,
+    ) -> task::Poll<std::io::Result<()>> {
         task::Poll::Ready(Ok(()))
     }
 }

@@ -1,32 +1,15 @@
-use std::{
-    borrow::{Borrow, BorrowMut},
-    collections::{HashMap, VecDeque},
-    default,
-    fmt::write,
-    hash::Hash,
-    io::{self, Cursor, Error, ErrorKind, Read, Write},
-    iter::FromIterator,
-    ops::Deref,
-    sync::{
-        mpsc::{self, sync_channel, Receiver, Sender},
-        Arc, PoisonError,
-    },
-    thread::{self, JoinHandle},
-    time::Duration,
+use
+{
+	ws_stream_tungstenite :: { *                                         } ,
+	futures               :: { AsyncReadExt, io::{ BufReader, copy_buf } } ,
+	std                   :: { env, net::SocketAddr, io                  } ,
+	tokio                 :: { net::{ TcpListener, TcpStream }           } ,
+	async_tungstenite     :: { accept_async, tokio::TokioAdapter     } ,
 };
-
-use futures::{
-    channel::{
-        mpsc::UnboundedReceiver,
-        oneshot::{self, channel},
-    },
-    future::{BoxFuture, LocalBoxFuture},
-    AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, FutureExt, StreamExt,
-};
-use multiplexor::Multiplexor;
 
 use crate::frame::*;
 
+mod error;
 mod frame;
 mod multiplexor;
 mod rw;
@@ -34,132 +17,59 @@ mod rw;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
-        //let (in_tx, in_rx) = channel::unbounded();
-        //let (out_tx, out_rx) = channel::unbounded();
-        /*
-        let mut m = MultiplexingStream {
-            input: in_tx,
-            output: out_rx,
-            output_buf: VecDeque::new()
-        };
+    let addr: SocketAddr = "127.0.0.1:3212".to_string().parse().unwrap();
+	println!( "server task listening at: {}", &addr );
 
-        let b = vec![0, 1, 2];
-        m.write(&b.as_slice()).await.unwrap();
+	let socket = TcpListener::bind(&addr).await.unwrap();
+    
+    loop
+	{
+		tokio::spawn( handle_conn( socket.accept().await ) );
+	}
+/*
+    let (c_tx, c_rx) = mpsc::channel();
+    let c_r = Reader::new(c_rx);
+    let c_w = Writer::new(c_tx);
 
-        println!("{:?}", in_rx.recv().await.unwrap());
+    let (s_tx, s_rx) = mpsc::channel();
+    let s_r = Reader::new(s_rx);
+    let s_w = Writer::new(s_tx);
 
-        let b = vec![0, 1, 2];
-        out_tx.send(b).await.unwrap();
+    tokio::spawn(async move {
+        let mut mux = Multiplexor::new(c_r, s_w);
+        let (mut writer, mut reader) = mux.offer("Common").await.unwrap();
 
-        let mut r = vec![0, 0];
-        let rl = m.read(&mut r).await.unwrap();
-        println!("{} {:?}", rl, r);
+        AsyncWriteExt::write_all(&mut writer, &[1, 2, 3, 6])
+            .await
+            .unwrap();
 
-        let mut r = vec![0, 0];
-        let rl = m.read(&mut r).await.unwrap();
-        println!("{} {:?}", rl, r);*/
+        drop(writer);
 
-        /*let (out_tx, out_rx) = channel::unbounded();
+        tokio::time::sleep(Duration::from_secs(100)).await;
+    });
 
-        let mut testio = TestIo {
-            output: out_rx,
-            output_buf: Default::default(),
-            read_fut: None,
-        };
+    let mut mux = Multiplexor::new(s_r, c_w);
 
-        let mut stdout = async_std::io::stdout();
-        let mut stdin = async_std::io::stdin();
-
-        //let mut file = File::open("d://1.txt").await?;
-
-        let m = Arc::new(Multiplexor::new(stdin));
-
-        let m1 = m.clone();
-        task::spawn(async move {
-            let mut stream = future::timeout(Duration::from_millis(5000), m1.offer_stream())
-                .await
-                .unwrap();
-
-            println!("==1 offered");
-
-            loop {
-                let mut buf = [0; 5];
-                AsyncReadExt::read(&mut stream, &mut buf).await.unwrap();
-                println!("==1: {:?}", buf);
-            }
-            //let b = "Hello".as_bytes();
-            //s.send(&b).await.unwrap();
-        });
-
-        let r: Vec<u8> = Frame::OfferAccepted {
-            s_id: 1,
-            window_size: None,
-        }
-        .into();
-        out_tx.send(vec![r.len() as u8]).await.unwrap();
-        out_tx.send(r).await.unwrap();
-
-        let m0 = m.clone();
-        task::spawn(async move {
-            m0.run(testio).await.unwrap();
-        });
-
-        task::sleep(Duration::from_millis(500)).await;
-
-        let r: Vec<u8> = Frame::Content {
-            s_id: 1,
-            payload: "sdfdsfds".to_owned().into_bytes(),
-        }
-        .into();
-        out_tx.send(vec![r.len() as u8]).await.unwrap();
-        out_tx.send(r).await.unwrap();
-
-        let r: Vec<u8> = Frame::Content {
-            s_id: 1,
-            payload: "sdfdsfds".to_owned().into_bytes(),
-        }
-        .into();
-        out_tx.send(vec![r.len() as u8]).await.unwrap();
-        out_tx.send(r).await.unwrap();
-
-        task::sleep(Duration::from_secs(100)).await;*/
-
-        let (c_tx, c_rx) = mpsc::channel();
-        let c_r = Reader::new(c_rx);
-        let c_w = Writer::new(c_tx);
-
-        let (s_tx, s_rx) = mpsc::channel();
-        let s_r = Reader::new(s_rx);
-        let s_w = Writer::new(s_tx);
+    loop {
+        let (name, mut writer, mut reader) = mux.listen().await.unwrap();
+        println!("incoming stream: {}", name);
 
         tokio::spawn(async move {
-            let mut mux = Multiplexor::new(c_r, s_w);
-            let (mut writer, mut reader) = mux.offer("Common").await.unwrap();
-
-            AsyncWriteExt::write_all(&mut writer, &[1, 2, 3, 6])
-                .await
-                .unwrap();
-                tokio::time::sleep(Duration::from_secs(100)).await;
-        });
-
-        let mut mux = Multiplexor::new(s_r, c_w);
-
-        loop {
-            let (name, mut writer, mut reader) = mux.listen().await.unwrap();
-            println!("incoming stream: {}", name);
-
-            tokio::spawn(async move {
-                let mut buf = [1; 1];
+            let mut buf = [1; 1];
+            loop {
                 AsyncReadExt::read_exact(&mut reader, &mut buf)
                     .await
                     .unwrap();
                 println!("Server in: {:?}", buf);
-            });
-        }
+            }
+        });
+    }
 
-        Ok(())
+    tokio::time::sleep(Duration::from_secs(100)).await;
+*/
+    Ok(())
 }
-
+/*
 pub struct Reader<T> {
     output: Receiver<Vec<T>>,
     output_buf: Vec<T>,
@@ -231,4 +141,50 @@ impl Write for Writer<u8> {
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
     }
+}
+*/
+async fn handle_conn( stream: Result< (TcpStream, SocketAddr), io::Error> )
+{
+
+	// If the TCP stream fails, we stop processing this connection
+	//
+	let (tcp_stream, peer_addr) = match stream
+	{
+		Ok( tuple ) => tuple,
+
+		Err(e) =>
+		{
+			println!( "Failed TCP incoming connection: {}", e );
+			return;
+		}
+	};
+       
+	let s = accept_async( TokioAdapter::new(tcp_stream) ).await;
+
+	// If the Ws handshake fails, we stop processing this connection
+	//
+	let socket = match s
+	{
+		Ok(ws) => ws,
+
+		Err(e) =>
+		{
+			println!( "Failed WebSocket HandShake: {}", e );
+			return;
+		}
+	};
+
+
+	println!( "Incoming connection from: {}", peer_addr );
+
+	let ws_stream = WsStream::new( socket );
+	let (reader, mut writer) = ws_stream.split();
+
+	// BufReader allows our AsyncRead to work with a bigger buffer than the default 8k.
+	// This improves performance quite a bit.
+	//
+	if let Err(e) = copy_buf( BufReader::with_capacity( 64_000, reader ), &mut writer ).await
+	{
+		println!( "{:?}", e.kind() )
+	}
 }
