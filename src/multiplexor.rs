@@ -5,8 +5,11 @@ use std::{
     thread::{self, JoinHandle},
 };
 
-use futures::{Future, FutureExt, channel::oneshot, future::BoxFuture};
-use tokio::{io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, DuplexStream}, sync::mpsc::{self, error::TryRecvError, Receiver, Sender}};
+use futures::{channel::oneshot, future::BoxFuture, Future, FutureExt};
+use tokio::{
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, DuplexStream},
+    sync::mpsc::{self, error::TryRecvError, Receiver, Sender},
+};
 use tokio_util::compat::TokioAsyncReadCompatExt;
 
 use crate::{
@@ -17,28 +20,43 @@ use crate::{
 pub struct Multiplexor {
     //read_handler: JoinHandle<Result<(), Error>>,
     //write_handler: JoinHandle<Result<(), Error>>,
-
     incoming_r_rx: Receiver<Incoming>,
     listen_tx: Sender<(StreamId, oneshot::Sender<Outcoming>)>,
 
     incoming_w_tx: Sender<Incoming>,
     message_tx: Sender<Frame>,
 
+    write_q_tx: Sender<Vec<u8>>,
+
     last_id: u64,
 }
 
 impl Multiplexor {
-    pub fn new<R: AsyncRead + Unpin + Send + 'static, W: AsyncWrite + Send + Unpin + 'static>(read: R, write: W) -> Self {
+    pub fn new<R: AsyncRead + Unpin + Send + 'static, W: AsyncWrite + Send + Unpin + 'static>(
+        read: R,
+        mut write: W,
+    ) -> Self {
+        let (write_q_tx, write_q_rx) = mpsc::channel(1024);
+
         let (message_tx, message_rx) = mpsc::channel(1024);
         let message_tx_ref = message_tx.clone();
 
         let (incoming_r_tx, incoming_r_rx) = mpsc::channel(1024);
         let (listen_tx, listen_rx) = mpsc::channel(1024);
-        let read_handler = tokio::spawn(async move { read_loop(read, message_tx_ref, incoming_r_tx, listen_rx).await });
+        let read_handler = tokio::spawn(async move {
+            read_loop(read, message_tx_ref, incoming_r_tx, listen_rx)
+                .await
+                .unwrap()
+        });
 
         let (incoming_w_tx, incoming_w_rx) = mpsc::channel(1024);
-        let write_handler = tokio::spawn(async move { write_loop(write, message_rx, incoming_w_rx).await });
-        
+
+        let write_handler = tokio::spawn(async move {
+            write_loop(write, message_rx, incoming_w_rx, write_q_rx)
+                .await
+                .unwrap()
+        });
+
         Self {
             //write_handler,
             //read_handler,
@@ -46,6 +64,7 @@ impl Multiplexor {
             listen_tx,
             message_tx,
             incoming_w_tx,
+            write_q_tx,
             last_id: 0,
         }
     }
@@ -55,15 +74,15 @@ impl Multiplexor {
 
         let (mut client, mut server) = tokio::io::duplex(64);
 
-        self.incoming_w_tx
-            .send(Incoming {
-                s_id: incoming.s_id,
-                name: incoming.name.clone(),
-                rx: server,
-                window_size: incoming.window_size,
-            })
-            .await
-            .unwrap();
+        /*self.incoming_w_tx
+        .send(Incoming {
+            s_id: incoming.s_id,
+            name: incoming.name.clone(),
+            rx: server,
+            window_size: incoming.window_size,
+        })
+        .await
+        .unwrap();*/
 
         self.message_tx
             .send(Frame::OfferAccepted {
@@ -73,11 +92,24 @@ impl Multiplexor {
             .await
             .unwrap();
 
-        Ok((
-            incoming.name,
-            client,
-            incoming.rx,
-        ))
+        let write_q_tx_ref = self.write_q_tx.clone();
+
+        tokio::spawn(async move {
+            let mut buffer = [0_u8; 1];
+            match server.read(&mut buffer[..]).await {
+                Ok(n) => {
+                    write_q_tx_ref
+                        .send(buffer.into_iter().take(n).map(|s| *s).collect())
+                        .await
+                        .unwrap();
+                }
+                Err(e) => {
+                    println!("writer `{}` is die", 1);
+                }
+            }
+        });
+
+        Ok((incoming.name, client, incoming.rx))
     }
 
     pub async fn offer(
@@ -104,15 +136,34 @@ impl Multiplexor {
 
         let (mut client, mut server) = tokio::io::duplex(64);
 
-        self.incoming_w_tx
-            .send(Incoming {
-                s_id: outcoming.s_id,
-                name: name,
-                rx: server,
-                window_size: outcoming.window_size,
-            })
-            .await
-            .unwrap();
+        /*self.incoming_w_tx
+        .send(Incoming {
+            s_id: outcoming.s_id,
+            name: name,
+            rx: server,
+            window_size: outcoming.window_size,
+        })
+        .await
+        .unwrap();*/
+
+        let write_q_tx_ref = self.write_q_tx.clone();
+
+        tokio::spawn(async move {
+            loop {
+                let mut buffer = [0_u8; 1024];
+                match server.read(&mut buffer[..]).await {
+                    Ok(n) => {
+                        write_q_tx_ref
+                            .send(buffer.into_iter().take(n).map(|s| *s).collect())
+                            .await
+                            .unwrap();
+                    }
+                    Err(e) => {
+                        println!("writer `{}` is die", 1);
+                    }
+                }
+            }
+        });
 
         Ok((client, outcoming.rx))
     }
@@ -150,7 +201,7 @@ async fn read_loop<R: AsyncRead + Unpin + Send>(
                 window_size,
             } => {
                 let (mut client, mut server) = tokio::io::duplex(64);
-                
+
                 map.insert(s_id, client);
                 incoming_tx
                     .try_send(Incoming {
@@ -202,15 +253,16 @@ async fn read_loop<R: AsyncRead + Unpin + Send>(
             }
             Frame::Content { s_id, payload } => {
                 let payload_len = payload.len() as i64;
-                
+
                 match map.get_mut(&s_id) {
                     Some(s) => match s.write_all(&payload).await {
                         Ok(_) => {
                             message_tx
-                                .try_send(Frame::ContentProcessed {
+                                .send(Frame::ContentProcessed {
                                     s_id,
                                     processed: payload_len,
                                 })
+                                .await
                                 .unwrap();
                         }
                         Err(e) => {
@@ -239,17 +291,21 @@ async fn read_loop<R: AsyncRead + Unpin + Send>(
     }
 }
 
-async fn write_loop<W: AsyncWriteExt + Unpin>(
+async fn write_loop<W: AsyncWrite + Unpin>(
     mut write: W,
     mut message_rx: Receiver<Frame>,
     mut incoming_rx: Receiver<Incoming>,
+    mut write_q_rx: Receiver<Vec<u8>>,
 ) -> std::io::Result<()> {
     let mut writers = Vec::new();
     loop {
+        let mut processed = false;
+
         match message_rx.try_recv() {
             Ok(msg) => {
                 write_frame(&mut write, msg.into()).await?;
-            },
+                processed = true;
+            }
             Err(e) => match e {
                 TryRecvError::Empty => {}
                 TryRecvError::Disconnected => {
@@ -260,32 +316,34 @@ async fn write_loop<W: AsyncWriteExt + Unpin>(
         match incoming_rx.try_recv() {
             Ok(w) => {
                 writers.push(w);
+                processed = true;
             }
             Err(e) => match e {
                 TryRecvError::Empty => {}
-                TryRecvError::Disconnected => {                    
+                TryRecvError::Disconnected => {
                     return Err(Error::new(ErrorKind::Other, "incoming channel is closed"))
                 }
             },
         }
-        for i in 0..writers.len() {
-            let w = writers.get_mut(i).unwrap();
-            let mut buffer = [0_u8; 10];
-            match w.rx.read(&mut buffer[..]).await {
-                Ok(n) => {
-                    let frame = Frame::Content {
-                        s_id: w.s_id,
-                        payload: buffer.into_iter().take(n).map(|s| *s).collect(),
-                    };
-                    write_frame(&mut write, frame.into()).await?;
-                }
-                Err(e) =>  {
-                        let w = writers.remove(i);
-                        println!("writer `{}` is die", w.s_id);
-                        let frame = Frame::ChannelTerminated { s_id: w.s_id };
-                        write_frame(&mut write, frame.into()).await?;
-                },
+        match write_q_rx.try_recv() {
+            Ok(w) => {
+                let frame = Frame::Content {
+                    s_id: 1,
+                    payload: w,
+                };
+                write_frame(&mut write, frame.into()).await?;
+                processed = true;
             }
+            Err(e) => match e {
+                TryRecvError::Empty => {}
+                TryRecvError::Disconnected => {
+                    return Err(Error::new(ErrorKind::Other, "incoming channel is closed"))
+                }
+            },
+        }
+
+        if (!processed) {
+            tokio::task::yield_now().await;
         }
     }
 }

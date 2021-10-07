@@ -5,7 +5,7 @@ use std::{
     vec,
 };
 
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 pub type StreamId = u64;
@@ -100,12 +100,7 @@ pub async fn write_frame<W: AsyncWrite + Unpin>(write: W, value: Frame) -> Resul
                 .next();
             match window_size {
                 Some(s) => {
-                    writer                        
-                        .write_array_len(1)
-                        .await?
-                        .next()
-                        .write_int(s)
-                        .await?;
+                    writer.write_array_len(1).await?.next().write_int(s).await?;
                 }
                 None => {
                     writer.write_array_len(0).await?;
@@ -188,15 +183,9 @@ pub async fn write_frame<W: AsyncWrite + Unpin>(write: W, value: Frame) -> Resul
 
 pub async fn read_frame<R: AsyncRead + Unpin + Send>(mut read: R) -> Result<Frame> {
     let read = read.compat();
-    println!("s1");
+
     let reader = rmp_futures::decode::MsgPackFuture::new(read);
-    println!("s2");
-    let a = reader.decode().await?;
-    println!("s2.1");
-    let b = a.into_array().unwrap();
-    println!("s2.2");
-    let reader = b;
-    println!("s3");
+    let reader = reader.decode().await?.into_array().unwrap();
     let (code, reader) = reader.next().unwrap().decode().await?.into_u64().unwrap();
     println!("s4");
     println!("{}", code);
@@ -205,10 +194,20 @@ pub async fn read_frame<R: AsyncRead + Unpin + Send>(mut read: R) -> Result<Fram
             let (s_id, reader) = reader.next().unwrap().decode().await?.into_u64().unwrap();
             let (source, reader) = reader.next().unwrap().decode().await?.into_u64().unwrap();
             let reader = reader.next().unwrap().decode().await?.into_array().unwrap();
-            let (name, reader) = reader.next().unwrap().decode().await?.into_string().unwrap().into_string().await.unwrap();
-            
+            let (name, reader) = reader
+                .next()
+                .unwrap()
+                .decode()
+                .await?
+                .into_string()
+                .unwrap()
+                .into_string()
+                .await
+                .unwrap();
+
             let window_size = if reader.len() > 0 {
-                let (window_size, reader) = reader.next().unwrap().decode().await?.into_u64().unwrap();
+                let (window_size, reader) =
+                    reader.next().unwrap().decode().await?.into_u64().unwrap();
                 Some(window_size)
             } else {
                 None
@@ -224,9 +223,10 @@ pub async fn read_frame<R: AsyncRead + Unpin + Send>(mut read: R) -> Result<Fram
             let (s_id, reader) = reader.next().unwrap().decode().await?.into_u64().unwrap();
             let (source, reader) = reader.next().unwrap().decode().await?.into_u64().unwrap();
             let reader = reader.next().unwrap().decode().await?.into_array().unwrap();
-            
+
             let window_size = if reader.len() > 0 {
-                let (window_size, reader) = reader.next().unwrap().decode().await?.into_u64().unwrap();
+                let (window_size, reader) =
+                    reader.next().unwrap().decode().await?.into_u64().unwrap();
                 Some(window_size)
             } else {
                 None
@@ -237,7 +237,16 @@ pub async fn read_frame<R: AsyncRead + Unpin + Send>(mut read: R) -> Result<Fram
         2 => {
             let (s_id, reader) = reader.next().unwrap().decode().await?.into_u64().unwrap();
             let (source, reader) = reader.next().unwrap().decode().await?.into_u64().unwrap();
-            let (payload, reader) = reader.next().unwrap().decode().await?.into_bin().unwrap().into_vec().await.unwrap();
+            let (payload, reader) = reader
+                .next()
+                .unwrap()
+                .decode()
+                .await?
+                .into_bin()
+                .unwrap()
+                .into_vec()
+                .await
+                .unwrap();
 
             Frame::Content { s_id, payload }
         }
@@ -247,7 +256,10 @@ pub async fn read_frame<R: AsyncRead + Unpin + Send>(mut read: R) -> Result<Fram
             let reader = reader.next().unwrap().decode().await?.into_array().unwrap();
             let (processed, reader) = reader.next().unwrap().decode().await?.into_u64().unwrap();
 
-            Frame::ContentProcessed { s_id, processed: processed as i64 }
+            Frame::ContentProcessed {
+                s_id,
+                processed: processed as i64,
+            }
         }
         3 => {
             let (s_id, reader) = reader.next().unwrap().decode().await?.into_u64().unwrap();

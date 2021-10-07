@@ -1,8 +1,6 @@
 use {
     async_tungstenite::{accept_async, tokio::TokioAdapter},
-    futures::{
-        io::{copy_buf, BufReader},
-    },
+    futures::io::{copy_buf, BufReader},
     std::{env, io, net::SocketAddr},
     tokio::net::{TcpListener, TcpStream},
     ws_stream_tungstenite::*,
@@ -10,7 +8,10 @@ use {
 
 use std::time::Duration;
 
-use tokio::{io::{AsyncReadExt, AsyncWriteExt}, sync::mpsc};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    sync::mpsc,
+};
 
 use crate::{
     frame::*,
@@ -34,8 +35,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tokio::spawn(handle_conn(socket.accept().await));
     }*/
 
-    let (client1, server1) =  tokio::io::duplex(64);
-    let (client2, server2) =  tokio::io::duplex(64);
+    let (mut client1, mut server1) = tokio::io::duplex(64);
+    let (client2, server2) = tokio::io::duplex(64);
 
     tokio::spawn(async move {
         //tokio::time::sleep(Duration::from_secs(2)).await;
@@ -52,25 +53,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .unwrap();
                 println!("Server in: {:?}", buf);
             }
-        });
+        })
+        .await
+        .unwrap();
     });
+    tokio::time::sleep(Duration::from_secs(1)).await;
 
-    //tokio::time::sleep(Duration::from_secs(1)).await;
     let mut mux = Multiplexor::new(client2, client1);
 
-    loop {           
+    loop {
         let (mut writer, mut reader) = mux.offer("Common").await.unwrap();
         println!("gffdgd");
         AsyncWriteExt::write_all(&mut writer, &[1, 2, 3, 6])
             .await
             .unwrap();
         //drop(writer);
-        
+
         tokio::time::sleep(Duration::from_secs(100)).await;
-        
+
         let readerw = &mut reader;
-        
-        let writer23 = &mut writer;     
+
+        let writer23 = &mut writer;
     }
 
     tokio::time::sleep(Duration::from_secs(100)).await;
@@ -177,7 +180,7 @@ async fn handle_conn(stream: Result<(TcpStream, SocketAddr), io::Error>) {
     };
 
     println!("Incoming connection from: {}", peer_addr);
-/* 
+    /*
     let ws_stream = WsStream::new(socket);
     let (reader, mut writer) = ws_stream.split();
 
