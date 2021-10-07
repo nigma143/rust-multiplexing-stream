@@ -75,11 +75,11 @@ impl AsyncRead for Reader<u8> {
                 unsafe { std::intrinsics::transmute(fut) };
             this.fut = Some(fut);
         }
-
+        
         let poll = this.fut.as_mut().unwrap().poll_unpin(cx);
 
         if poll.is_ready() {
-            this.fut = None;
+            this.fut = None;            
         }
 
         poll
@@ -123,7 +123,7 @@ impl AsyncWrite for Writer<u8> {
                 unsafe { std::intrinsics::transmute(fut) };
             this.fut = Some(fut);
         }
-
+        
         let poll = this.fut.as_mut().unwrap().poll_unpin(cx);
 
         if poll.is_ready() {

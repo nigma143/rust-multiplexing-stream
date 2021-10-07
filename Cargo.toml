@@ -11,8 +11,9 @@ edition = "2018"
 [dependencies]
 futures = { version = "0.3.*" }
 tokio = { version = "1.12.0", features = ["full"] }
+tokio-util = { version = "0.6.8", features = ["compat"] }
 triggered = "0.1.2"
-rmp = "0.8.10"
+rmp-futures = "0.2.0"
 
 ws_stream_tungstenite = "0.6.1"
 async-tungstenite ={ version = "0.13.0", features = ["tokio-runtime", "async-std-runtime"] }

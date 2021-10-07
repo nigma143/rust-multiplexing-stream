@@ -5,7 +5,8 @@ use std::{
     vec,
 };
 
-use futures::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncWrite};
+use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 pub type StreamId = u64;
 
@@ -36,91 +37,179 @@ pub enum Frame {
     },
 }
 
-pub fn sync_write_frame<W: Write>(mut write: W, value: Frame) -> Result<()> {
+pub async fn write_frame<W: AsyncWrite + Unpin>(write: W, value: Frame) -> Result<()> {
+    println!("write");
+    let write = write.compat_write();
     match value {
         Frame::Offer {
             s_id,
             name,
             window_size,
         } => {
-            rmp::encode::write_array_len(&mut write, 4)?;
-            rmp::encode::write_i32(&mut write, 0)?;
-            rmp::encode::write_u64(&mut write, s_id)?;
-            rmp::encode::write_i8(&mut write, 1)?;
+            let writer = rmp_futures::encode::MsgPackWriter::new(write);
+            let writer = writer
+                .write_array_len(4)
+                .await?
+                .next()
+                .write_int(0)
+                .await?
+                .next()
+                .write_int(s_id)
+                .await?
+                .next()
+                .write_int(1)
+                .await?
+                .next();
+
             match window_size {
                 Some(s) => {
-                    rmp::encode::write_array_len(&mut write, 2)?;
-                    rmp::encode::write_str(&mut write, &name)?;
-                    rmp::encode::write_u64(&mut write, s)?;
+                    writer
+                        .write_array_len(2)
+                        .await?
+                        .next()
+                        .write_str(&name)
+                        .await?
+                        .next()
+                        .write_int(s)
+                        .await?;
                 }
                 None => {
-                    rmp::encode::write_array_len(&mut write, 1)?;
-                    rmp::encode::write_str(&mut write, &name)?;
+                    writer
+                        .write_array_len(1)
+                        .await?
+                        .next()
+                        .write_str(&name)
+                        .await?;
                 }
             }
         }
         Frame::OfferAccepted { s_id, window_size } => {
-            rmp::encode::write_array_len(&mut write, 4)?;
-            rmp::encode::write_i32(&mut write, 1)?;
-            rmp::encode::write_u64(&mut write, s_id)?;
-            rmp::encode::write_i8(&mut write, 1)?;
+            let writer = rmp_futures::encode::MsgPackWriter::new(write);
+            let writer = writer
+                .write_array_len(4)
+                .await?
+                .next()
+                .write_int(1)
+                .await?
+                .next()
+                .write_int(s_id)
+                .await?
+                .next()
+                .write_int(1)
+                .await?
+                .next();
             match window_size {
                 Some(s) => {
-                    rmp::encode::write_array_len(&mut write, 1)?;
-                    rmp::encode::write_u64(&mut write, s)?;
+                    writer                        
+                        .write_array_len(1)
+                        .await?
+                        .next()
+                        .write_int(s)
+                        .await?;
                 }
                 None => {
-                    rmp::encode::write_array_len(&mut write, 0)?;
+                    writer.write_array_len(0).await?;
                 }
             }
         }
         Frame::Content { s_id, payload } => {
-            rmp::encode::write_array_len(&mut write, 4)?;
-            rmp::encode::write_i32(&mut write, 2)?;
-            rmp::encode::write_u64(&mut write, s_id)?;
-            rmp::encode::write_i8(&mut write, 1)?;
-            rmp::encode::write_bin(&mut write, &payload[..])?;
+            let writer = rmp_futures::encode::MsgPackWriter::new(write);
+            writer
+                .write_array_len(4)
+                .await?
+                .next()
+                .write_int(2)
+                .await?
+                .next()
+                .write_int(s_id)
+                .await?
+                .next()
+                .write_int(1)
+                .await?
+                .next()
+                .write_bin(&payload[..])
+                .await?;
         }
         Frame::ContentProcessed { s_id, processed } => {
-            rmp::encode::write_array_len(&mut write, 4)?;
-            rmp::encode::write_i32(&mut write, 5)?;
-            rmp::encode::write_u64(&mut write, s_id)?;
-            rmp::encode::write_i8(&mut write, 1)?;
-            rmp::encode::write_array_len(&mut write, 1)?;
-            rmp::encode::write_i64(&mut write, processed)?;
+            let writer = rmp_futures::encode::MsgPackWriter::new(write);
+            writer
+                .write_array_len(4)
+                .await?
+                .next()
+                .write_int(5)
+                .await?
+                .next()
+                .write_int(s_id)
+                .await?
+                .next()
+                .write_int(1)
+                .await?
+                .next()
+                .write_array_len(1)
+                .await?
+                .next()
+                .write_int(processed)
+                .await?;
         }
         Frame::ContentWritingCompleted { s_id } => {
-            rmp::encode::write_array_len(&mut write, 3)?;
-            rmp::encode::write_i32(&mut write, 3)?;
-            rmp::encode::write_u64(&mut write, s_id)?;
-            rmp::encode::write_i8(&mut write, 1)?;
+            let writer = rmp_futures::encode::MsgPackWriter::new(write);
+            writer
+                .write_array_len(3)
+                .await?
+                .next()
+                .write_int(3)
+                .await?
+                .next()
+                .write_int(s_id)
+                .await?
+                .next()
+                .write_int(1)
+                .await?;
         }
         Frame::ChannelTerminated { s_id } => {
-            rmp::encode::write_array_len(&mut write, 3)?;
-            rmp::encode::write_i32(&mut write, 4)?;
-            rmp::encode::write_u64(&mut write, s_id)?;
-            rmp::encode::write_i8(&mut write, 1)?;
+            let writer = rmp_futures::encode::MsgPackWriter::new(write);
+            writer
+                .write_array_len(3)
+                .await?
+                .next()
+                .write_int(4)
+                .await?
+                .next()
+                .write_int(s_id)
+                .await?
+                .next()
+                .write_int(1)
+                .await?;
         }
     }
-
+    println!("writeE");
     Ok(())
 }
 
-pub fn sync_read_frame<R: Read>(mut read: R) -> Result<Frame> {
-    let _ = rmp::decode::read_array_len(&mut read).unwrap();
-    let code = rmp::decode::read_i32(&mut read).unwrap();
-
+pub async fn read_frame<R: AsyncRead + Unpin + Send>(mut read: R) -> Result<Frame> {
+    let read = read.compat();
+    println!("s1");
+    let reader = rmp_futures::decode::MsgPackFuture::new(read);
+    println!("s2");
+    let a = reader.decode().await?;
+    println!("s2.1");
+    let b = a.into_array().unwrap();
+    println!("s2.2");
+    let reader = b;
+    println!("s3");
+    let (code, reader) = reader.next().unwrap().decode().await?.into_u64().unwrap();
+    println!("s4");
+    println!("{}", code);
     let frame = match code {
         0 => {
-            let s_id = rmp::decode::read_u64(&mut read).unwrap();
-            let source = rmp::decode::read_i8(&mut read).unwrap();
-            let offer_param_len = rmp::decode::read_array_len(&mut read).unwrap();
-
-            let mut buf = vec![0; 128];
-            let name = rmp::decode::read_str(&mut read, &mut buf).unwrap().into();
-
-            let window_size = if offer_param_len == 2 {
-                Some(rmp::decode::read_u64(&mut read).unwrap())
+            let (s_id, reader) = reader.next().unwrap().decode().await?.into_u64().unwrap();
+            let (source, reader) = reader.next().unwrap().decode().await?.into_u64().unwrap();
+            let reader = reader.next().unwrap().decode().await?.into_array().unwrap();
+            let (name, reader) = reader.next().unwrap().decode().await?.into_string().unwrap().into_string().await.unwrap();
+            
+            let window_size = if reader.len() > 0 {
+                let (window_size, reader) = reader.next().unwrap().decode().await?.into_u64().unwrap();
+                Some(window_size)
             } else {
                 None
             };
@@ -132,11 +221,13 @@ pub fn sync_read_frame<R: Read>(mut read: R) -> Result<Frame> {
             }
         }
         1 => {
-            let s_id = rmp::decode::read_u64(&mut read).unwrap();
-            let source = rmp::decode::read_i8(&mut read).unwrap();
-            let offer_param_len = rmp::decode::read_array_len(&mut read).unwrap();
-            let window_size = if offer_param_len == 1 {
-                Some(rmp::decode::read_u64(&mut read).unwrap())
+            let (s_id, reader) = reader.next().unwrap().decode().await?.into_u64().unwrap();
+            let (source, reader) = reader.next().unwrap().decode().await?.into_u64().unwrap();
+            let reader = reader.next().unwrap().decode().await?.into_array().unwrap();
+            
+            let window_size = if reader.len() > 0 {
+                let (window_size, reader) = reader.next().unwrap().decode().await?.into_u64().unwrap();
+                Some(window_size)
             } else {
                 None
             };
@@ -144,36 +235,29 @@ pub fn sync_read_frame<R: Read>(mut read: R) -> Result<Frame> {
             Frame::OfferAccepted { s_id, window_size }
         }
         2 => {
-            let s_id = rmp::decode::read_u64(&mut read).unwrap();
-            let source = rmp::decode::read_i8(&mut read).unwrap();
-            let payload_len = rmp::decode::read_bin_len(&mut read).unwrap() as usize;
-
-            let mut payload: Vec<u8> = Vec::with_capacity(payload_len);
-            unsafe {
-                payload.set_len(payload_len);
-            }
-
-            read.read_exact(&mut payload)?;
+            let (s_id, reader) = reader.next().unwrap().decode().await?.into_u64().unwrap();
+            let (source, reader) = reader.next().unwrap().decode().await?.into_u64().unwrap();
+            let (payload, reader) = reader.next().unwrap().decode().await?.into_bin().unwrap().into_vec().await.unwrap();
 
             Frame::Content { s_id, payload }
         }
         5 => {
-            let s_id = rmp::decode::read_u64(&mut read).unwrap();
-            let source = rmp::decode::read_i8(&mut read).unwrap();
-            let _ = rmp::decode::read_array_len(&mut read).unwrap();
-            let processed = rmp::decode::read_i64(&mut read).unwrap();
+            let (s_id, reader) = reader.next().unwrap().decode().await?.into_u64().unwrap();
+            let (source, reader) = reader.next().unwrap().decode().await?.into_u64().unwrap();
+            let reader = reader.next().unwrap().decode().await?.into_array().unwrap();
+            let (processed, reader) = reader.next().unwrap().decode().await?.into_u64().unwrap();
 
-            Frame::ContentProcessed { s_id, processed }
+            Frame::ContentProcessed { s_id, processed: processed as i64 }
         }
         3 => {
-            let s_id = rmp::decode::read_u64(&mut read).unwrap();
-            let source = rmp::decode::read_i8(&mut read).unwrap();
+            let (s_id, reader) = reader.next().unwrap().decode().await?.into_u64().unwrap();
+            let (source, reader) = reader.next().unwrap().decode().await?.into_u64().unwrap();
 
             Frame::ContentWritingCompleted { s_id }
         }
         4 => {
-            let s_id = rmp::decode::read_u64(&mut read).unwrap();
-            let source = rmp::decode::read_i8(&mut read).unwrap();
+            let (s_id, reader) = reader.next().unwrap().decode().await?.into_u64().unwrap();
+            let (source, reader) = reader.next().unwrap().decode().await?.into_u64().unwrap();
 
             Frame::ChannelTerminated { s_id }
         }
