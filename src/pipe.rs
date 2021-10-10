@@ -36,6 +36,12 @@ impl AsyncRead for PipeReader {
     }
 }
 
+impl Drop for PipeReader {
+    fn drop(&mut self) {
+        self.read.lock().unwrap().close_read();
+    }
+}
+
 #[derive(Debug)]
 pub struct PipeWriter {
     write: Arc<Mutex<Pipe>>,
@@ -65,6 +71,12 @@ impl AsyncWrite for PipeWriter {
         cx: &mut task::Context<'_>,
     ) -> Poll<std::io::Result<()>> {
         Pin::new(&mut *self.write.lock().unwrap()).poll_shutdown(cx)
+    }
+}
+
+impl Drop for PipeWriter {
+    fn drop(&mut self) {
+        self.write.lock().unwrap().close_write();
     }
 }
 

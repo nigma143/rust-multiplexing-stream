@@ -1,21 +1,30 @@
 use std::{
+    cmp,
     collections::HashMap,
     io::{Error, ErrorKind, Read, Write},
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicI32, AtomicU32, AtomicU64, AtomicUsize, Ordering},
+        Arc,
+    },
     thread::{self, JoinHandle},
 };
 
 use futures::{channel::oneshot, future::BoxFuture, Future, FutureExt};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
-    sync::mpsc::{self, error::TryRecvError, Receiver, Sender},
+    sync::{
+        mpsc::{self, error::TryRecvError, Receiver, Sender},
+        Mutex,
+    },
 };
 use tokio_util::compat::TokioAsyncReadCompatExt;
 
 use crate::{
-    frame::{read_frame, write_frame, Frame, StreamId},
+    frame::{read_frame, sync_write_frame, write_frame, Frame, StreamId},
     pipe::{self, PipeReader, PipeWriter},
 };
+
+const DEFAULT_REM_WIN_SIZE: usize = 5 * 20 * 1024;
 
 pub struct Multiplexor {
     //read_handler: JoinHandle<Result<(), Error>>,
@@ -28,13 +37,7 @@ pub struct Multiplexor {
 
     write_q_tx: Sender<WriteMsg>,
 
-    last_id: u64,
-}
-
-#[derive(Debug)]
-enum WriteMsg {
-    Content { s_id: StreamId, payload: Vec<u8> },
-    Error { s_id: StreamId, error: Error },
+    last_id: Arc<AtomicUsize>,
 }
 
 impl Multiplexor {
@@ -71,7 +74,7 @@ impl Multiplexor {
             message_tx,
             incoming_w_tx,
             write_q_tx,
-            last_id: 0,
+            last_id: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -80,32 +83,48 @@ impl Multiplexor {
 
         self.message_tx
             .send(Frame::OfferAccepted {
-                s_id: incoming.s_id,
-                window_size: None,
+                id: incoming.id,
+                rem_window_size: Some(DEFAULT_REM_WIN_SIZE as u64),
             })
             .await
             .unwrap();
-        
-        let writer = self.run_read(&incoming);
+
+        let writer = run_read(self.write_q_tx.clone(), &incoming);
 
         Ok((incoming.name, incoming.rx, writer))
     }
 
+    pub fn outcoming(&mut self) -> OutcomminStream {
+        OutcomminStream {
+            last_id: self.last_id.clone(),
+            listen_tx: self.listen_tx.clone(),
+            message_tx: self.message_tx.clone(),
+            write_q_tx: self.write_q_tx.clone(),
+        }
+    }
+}
+
+pub struct OutcomminStream {
+    last_id: Arc<AtomicUsize>,
+    listen_tx: Sender<(Outcoming, oneshot::Sender<Incoming>)>,
+    message_tx: Sender<Frame>,
+    write_q_tx: Sender<WriteMsg>,
+}
+
+impl OutcomminStream {
     pub async fn offer(
         &mut self,
         name: impl Into<String>,
     ) -> Result<(PipeReader, PipeWriter), Error> {
-        self.last_id += 1;
-        let id = StreamId::Local(self.last_id);
+        let id = StreamId::Local(self.last_id.fetch_add(1, Ordering::Relaxed) as u64);
         let name = name.into();
 
         let (incoming_tx, incoming_rx) = oneshot::channel();
         self.listen_tx
             .send((
                 Outcoming {
-                    s_id: id,
+                    id,
                     name: name.clone(),
-                    window_size: Some(1024),
                 },
                 incoming_tx,
             ))
@@ -114,54 +133,88 @@ impl Multiplexor {
 
         self.message_tx
             .send(Frame::Offer {
-                s_id: id,
-                name: name.clone(),                
-                window_size: Some(1024),
+                id: id,
+                name: name.clone(),
+                window_size: Some(DEFAULT_REM_WIN_SIZE as u64),
             })
             .await
             .unwrap();
 
         let incoming = incoming_rx.await.unwrap();
 
-        let writer = self.run_read(&incoming);
+        //println!("incoming: {:?}", incoming);
+
+        let writer = run_read(self.write_q_tx.clone(), &incoming);
 
         Ok((incoming.rx, writer))
     }
+}
 
-    fn run_read(&self, incoming: &Incoming) -> PipeWriter {         
-        let write_q_tx = self.write_q_tx.clone();
-        let (mut reader, writer) = pipe::new_pipe(2048); 
-        let s_id = incoming.s_id;  
-
-        tokio::spawn(async move {
-            let mut buf = [0_u8; 1024];
-            let msg = match reader.read(&mut buf[..]).await {
-                Ok(n) => WriteMsg::Content {
-                    s_id: s_id,
-                    payload: buf[0..n].to_vec(),
-                },
-                Err(e) => WriteMsg::Error { s_id: s_id, error: e },
-            };
-            write_q_tx.send(msg).await.unwrap();
-        });
-
-        writer
-    }
+#[derive(Debug)]
+enum WriteMsg {
+    Content { id: StreamId, payload: Vec<u8> },
+    Error { id: StreamId, error: Error },
 }
 
 #[derive(Debug)]
 struct Incoming {
-    s_id: StreamId,
+    id: StreamId,
     name: String,
     rx: PipeReader,
-    window_size: Option<u64>,
+    rem_w_size: Arc<AtomicUsize>,
 }
 
 #[derive(Debug)]
 struct Outcoming {
-    s_id: StreamId,
+    id: StreamId,
     name: String,
-    window_size: Option<u64>,
+}
+
+fn run_read(write_q_tx: Sender<WriteMsg>, incoming: &Incoming) -> PipeWriter {
+    let (mut reader, writer) = pipe::new_pipe(DEFAULT_REM_WIN_SIZE);
+    let id = incoming.id;
+    let rem_w_size = incoming.rem_w_size.clone();
+
+    tokio::spawn(async move {
+        let mut buf = [0_u8; 2 * 1024];
+        loop {
+            let size = rem_w_size.load(Ordering::Relaxed);
+            let size = cmp::min(size, buf.len());
+            if size <= 0 {
+                tokio::task::yield_now().await;
+                continue;
+            }
+            let (msg, br) = match reader.read(&mut buf[0..size]).await {
+                Ok(n) => {
+                    if n == 0 {
+                        (
+                            WriteMsg::Error {
+                                id,
+                                error: Error::new(ErrorKind::Other, "read zero buffer"),
+                            },
+                            true,
+                        )
+                    } else {
+                        rem_w_size.fetch_sub(n, Ordering::Relaxed);
+                        (
+                            WriteMsg::Content {
+                                id,
+                                payload: buf[0..n].to_vec(),
+                            },
+                            false,
+                        )
+                    }
+                }
+                Err(e) => (WriteMsg::Error { id, error: e }, true),
+            };
+            write_q_tx.send(msg).await.unwrap();
+            if br {
+                return;
+            }
+        }
+    });
+
+    writer
 }
 
 async fn read_loop<R: AsyncRead + Unpin + Send>(
@@ -176,156 +229,177 @@ async fn read_loop<R: AsyncRead + Unpin + Send>(
     loop {
         match read_frame(&mut read).await? {
             Frame::Offer {
-                s_id,
+                id,
                 name,
                 window_size,
             } => {
-                let (reader, writer) = pipe::new_pipe(2048);
-                map.insert(s_id, writer);
+                let (reader, writer) = pipe::new_pipe(DEFAULT_REM_WIN_SIZE);
+                let rem_w_size = Arc::new(AtomicUsize::new(
+                    window_size.map_or(DEFAULT_REM_WIN_SIZE, |x| x as usize),
+                ));
+                let rem_w_size_ref = rem_w_size.clone();
+                map.insert(id, (writer, rem_w_size_ref));
                 incoming_tx
                     .send(Incoming {
-                        s_id,
+                        id,
                         name,
                         rx: reader,
-                        window_size,
+                        rem_w_size,
                     })
                     .await
                     .unwrap();
             }
-            Frame::OfferAccepted { s_id, window_size } => {
-                let (reader, writer) = pipe::new_pipe(2048);
-                if let Some((outcoming, listen)) = listen_map.remove(&s_id) {
-                    map.insert(s_id, writer);
+            Frame::OfferAccepted {
+                id,
+                rem_window_size,
+            } => {
+                let (reader, writer) = pipe::new_pipe(DEFAULT_REM_WIN_SIZE);
+                let rem_w_size = Arc::new(AtomicUsize::new(
+                    rem_window_size.map_or(DEFAULT_REM_WIN_SIZE, |x| x as usize),
+                ));
+                let rem_w_size_ref = rem_w_size.clone();
+
+                if let Some((outcoming, listen)) = listen_map.remove(&id) {
+                    map.insert(id, (writer, rem_w_size_ref));
                     listen
                         .send(Incoming {
-                            s_id: outcoming.s_id,
+                            id: outcoming.id,
                             name: outcoming.name,
                             rx: reader,
-                            window_size: window_size,
+                            rem_w_size,
                         })
                         .unwrap();
                 } else {
-                    match listen_rx.try_recv() {
-                        Ok((outcoming, listen)) => {
-                            if outcoming.s_id != s_id {
-                                listen_map.insert(outcoming.s_id, (outcoming, listen));
-                            } else {
-                                map.insert(s_id, writer);
-                                listen
-                                    .send(Incoming {
-                                        s_id: outcoming.s_id,
-                                        name: outcoming.name,
-                                        rx: reader,
-                                        window_size: window_size,
-                                    })
-                                    .unwrap();
+                    loop {
+                        match listen_rx.try_recv() {
+                            Ok((outcoming, listen)) => {
+                                if outcoming.id != id {
+                                    listen_map.insert(outcoming.id, (outcoming, listen));
+                                } else {
+                                    map.insert(id, (writer, rem_w_size_ref));
+                                    listen
+                                        .send(Incoming {
+                                            id: outcoming.id,
+                                            name: outcoming.name,
+                                            rx: reader,
+                                            rem_w_size,
+                                        })
+                                        .unwrap();
+                                    break;
+                                }
                             }
+                            Err(e) => match e {
+                                TryRecvError::Empty => break,
+                                TryRecvError::Disconnected => {
+                                    return Err(Error::new(
+                                        ErrorKind::Other,
+                                        "listen channel is closed",
+                                    ))
+                                }
+                            },
                         }
-                        Err(e) => match e {
-                            TryRecvError::Empty => {}
-                            TryRecvError::Disconnected => {
-                                return Err(Error::new(
-                                    ErrorKind::Other,
-                                    "listen channel is closed",
-                                ))
-                            }
-                        },
                     }
                 }
             }
-            Frame::Content { s_id, payload } => match map.get_mut(&s_id) {
-                Some(s) => match s.write_all(&payload).await {
+            Frame::Content { id, payload } => match map.get_mut(&id) {
+                Some((w, _)) => match w.write_all(&payload).await {
                     Ok(_) => {
                         message_tx
                             .send(Frame::ContentProcessed {
-                                s_id,
+                                id,
                                 processed: payload.len() as i64,
                             })
                             .await
                             .unwrap();
                     }
                     Err(e) => {
-                        map.remove(&s_id).unwrap();
-                        println!("reader `{:?}` is die. {}", s_id, e);
+                        map.remove(&id).unwrap();
+                        println!("reader `{:?}` is die. {}", id, e);
                         message_tx
-                            .send(Frame::ChannelTerminated { s_id })
+                            .send(Frame::ChannelTerminated { id })
                             .await
                             .unwrap();
                     }
                 },
-                None => println!("unknown reader `{:?}` on Content frame", s_id),
+                None => {} //println!("unknown reader `{:?}` on Content frame", id),
             },
-            Frame::ContentProcessed { s_id, processed } => {
-                println!("`{:?}` processed content size `{}`", s_id, processed)
-            }
-            Frame::ContentWritingCompleted { s_id } => match map.remove(&s_id) {
-                Some(r) => drop(r),
-                None => println!("unknown reader `{:?}` on ContentWritingCompleted frame", s_id),
+            Frame::ContentProcessed { id, processed } => match map.get_mut(&id) {
+                Some((_, r)) => {
+                    println!("processed: {}", processed);
+                    r.fetch_add(processed as usize, Ordering::Relaxed);
+                }
+                None => {} //println!("unknown reader `{:?}` on ContentProcessed frame", id),
             },
-            Frame::ChannelTerminated { s_id } => match map.remove(&s_id) {
+            Frame::ContentWritingCompleted { id } => match map.remove(&id) {
                 Some(r) => drop(r),
-                None => println!("unknown reader `{:?}` on ChannelTerminated", s_id),
+                None => {} //println!("unknown reader `{:?}` on ContentWritingCompleted frame", id),
+            },
+            Frame::ChannelTerminated { id } => match map.remove(&id) {
+                Some(r) => drop(r),
+                None => {} //println!("unknown reader `{:?}` on ChannelTerminated", id),
             },
         }
     }
 }
 
 async fn write_loop<W: AsyncWrite + Unpin>(
-    mut write: W,
+    write: W,
     mut message_rx: Receiver<Frame>,
     mut incoming_rx: Receiver<Incoming>,
     mut write_q_rx: Receiver<WriteMsg>,
 ) -> std::io::Result<()> {
     let mut writers = Vec::new();
-    loop {
-        let mut processed = false;
 
-        match message_rx.try_recv() {
-            Ok(msg) => {
-                write_frame(&mut write, msg.into()).await?;
-                processed = true;
-            }
-            Err(e) => match e {
-                TryRecvError::Empty => {}
-                TryRecvError::Disconnected => {
-                    return Err(Error::new(ErrorKind::Other, "message channel is closed"))
-                }
-            },
-        }
-        match incoming_rx.try_recv() {
-            Ok(w) => {
-                writers.push(w);
-                processed = true;
-            }
-            Err(e) => match e {
-                TryRecvError::Empty => {}
-                TryRecvError::Disconnected => {
-                    return Err(Error::new(ErrorKind::Other, "incoming channel is closed"))
-                }
-            },
-        }
-        match write_q_rx.try_recv() {
-            Ok(m) => {
-                let frame = match m {
-                    WriteMsg::Content { s_id, payload } => Frame::Content { s_id, payload },
-                    WriteMsg::Error { s_id, error } => {
-                        println!("writer `{:?}` is die. {}", s_id, error);
-                        Frame::ChannelTerminated { s_id }
-                    }
-                };
-                write_frame(&mut write, frame.into()).await?;
-                processed = true;
-            }
-            Err(e) => match e {
-                TryRecvError::Empty => {}
-                TryRecvError::Disconnected => {
-                    return Err(Error::new(ErrorKind::Other, "incoming channel is closed"))
-                }
-            },
-        }
+    let write = Arc::new(Mutex::new(write));
+    let write_ref1 = write.clone();
+    let write_ref2 = write.clone();
 
-        if !processed {
-            tokio::task::yield_now().await;
+    let write_message = async move {
+        loop {
+            match message_rx.recv().await {
+                Some(msg) => {
+                    let mut write = write_ref1.lock().await;
+                    write_frame(&mut *write, msg.into()).await?;
+                }
+                None => return Err(Error::new(ErrorKind::Other, "message channel is closed")),
+            }
         }
-    }
+        Ok(())
+    };
+
+    let incoming = async move {
+        loop {
+            match incoming_rx.recv().await {
+                Some(w) => {
+                    writers.push(w);
+                }
+                None => return Err(Error::new(ErrorKind::Other, "incoming channel is closed")),
+            }
+        }
+        Ok(())
+    };
+
+    let write_content = async move {
+        loop {
+            match write_q_rx.recv().await {
+                Some(m) => {
+                    let frame = match m {
+                        WriteMsg::Content { id, payload } => Frame::Content { id, payload },
+                        WriteMsg::Error { id, error } => {
+                            //println!("writer `{:?}` is die. {}", id, error);
+                            Frame::ChannelTerminated { id }
+                        }
+                    };
+                    let mut write = write_ref2.lock().await;
+                    sync_write_frame(&mut *write, frame).await?;
+                }
+                None => return Err(Error::new(ErrorKind::Other, "incoming channel is closed")),
+            }
+        }
+        Ok(())
+    };
+
+    tokio::try_join!(write_message, incoming, write_content)?;
+
+    Ok(())
 }
