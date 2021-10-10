@@ -20,7 +20,7 @@ use tokio::{
 use tokio_util::compat::TokioAsyncReadCompatExt;
 
 use crate::{
-    frame::{read_frame, sync_write_frame, write_frame, Frame, StreamId},
+    frame::{read_frame, write_frame, Frame, StreamId},
     pipe::{self, PipeReader, PipeWriter},
 };
 
@@ -352,13 +352,12 @@ async fn write_loop<W: AsyncWrite + Unpin>(
 
     let write = Arc::new(Mutex::new(write));
     let write_ref1 = write.clone();
-    let write_ref2 = write.clone();
 
     let write_message = async move {
         loop {
             match message_rx.recv().await {
                 Some(msg) => {
-                    let mut write = write_ref1.lock().await;
+                    let mut write = write.lock().await;
                     write_frame(&mut *write, msg.into()).await?;
                 }
                 None => return Err(Error::new(ErrorKind::Other, "message channel is closed")),
@@ -390,8 +389,8 @@ async fn write_loop<W: AsyncWrite + Unpin>(
                             Frame::ChannelTerminated { id }
                         }
                     };
-                    let mut write = write_ref2.lock().await;
-                    sync_write_frame(&mut *write, frame).await?;
+                    let mut write = write_ref1.lock().await;
+                    write_frame(&mut *write, frame).await?;
                 }
                 None => return Err(Error::new(ErrorKind::Other, "incoming channel is closed")),
             }
