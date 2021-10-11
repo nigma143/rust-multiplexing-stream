@@ -3,13 +3,12 @@ use std::{
     collections::HashMap,
     io::{Error, ErrorKind, Read, Write},
     sync::{
-        atomic::{AtomicI32, AtomicU32, AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicUsize, Ordering},
         Arc,
     },
-    thread::{self, JoinHandle},
 };
 
-use futures::{channel::oneshot, future::BoxFuture, Future, FutureExt};
+use futures::{channel::oneshot, Future};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     sync::{
@@ -17,7 +16,6 @@ use tokio::{
         Mutex,
     },
 };
-use tokio_util::compat::TokioAsyncReadCompatExt;
 
 use crate::{
     frame::{read_frame, write_frame, Frame, StreamId},
@@ -57,7 +55,6 @@ impl Multiplexor {
         });
 
         let (incoming_w_tx, incoming_w_rx) = mpsc::channel(1024);
-
         let (write_q_tx, write_q_rx) = mpsc::channel(1024);
 
         let write_handler = tokio::spawn(async move {
@@ -141,8 +138,6 @@ impl OutcomminStream {
             .unwrap();
 
         let incoming = incoming_rx.await.unwrap();
-
-        //println!("incoming: {:?}", incoming);
 
         let writer = run_read(self.write_q_tx.clone(), &incoming);
 
@@ -312,9 +307,8 @@ async fn read_loop<R: AsyncRead + Unpin + Send>(
                             .await
                             .unwrap();
                     }
-                    Err(e) => {
+                    Err(_) => {
                         map.remove(&id).unwrap();
-                        println!("reader `{:?}` is die. {}", id, e);
                         message_tx
                             .send(Frame::ChannelTerminated { id })
                             .await
@@ -325,7 +319,6 @@ async fn read_loop<R: AsyncRead + Unpin + Send>(
             },
             Frame::ContentProcessed { id, processed } => match map.get_mut(&id) {
                 Some((_, r)) => {
-                    println!("processed: {}", processed);
                     r.fetch_add(processed as usize, Ordering::Relaxed);
                 }
                 None => {} //println!("unknown reader `{:?}` on ContentProcessed frame", id),
@@ -384,10 +377,7 @@ async fn write_loop<W: AsyncWrite + Unpin>(
                 Some(m) => {
                     let frame = match m {
                         WriteMsg::Content { id, payload } => Frame::Content { id, payload },
-                        WriteMsg::Error { id, error } => {
-                            //println!("writer `{:?}` is die. {}", id, error);
-                            Frame::ChannelTerminated { id }
-                        }
+                        WriteMsg::Error { id, error: _ } => Frame::ChannelTerminated { id },
                     };
                     let mut write = write_ref1.lock().await;
                     write_frame(&mut *write, frame).await?;

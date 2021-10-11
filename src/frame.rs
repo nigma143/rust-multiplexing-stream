@@ -1,13 +1,11 @@
 use std::{
-    convert::TryInto,
     io::Result,
-    io::{Read, Write},
     vec,
 };
 
 use rmp_futures::decode::ValueFuture;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
-use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
+use tokio::io::{AsyncRead, AsyncWrite};
+use tokio_util::compat::{TokioAsyncReadCompatExt};
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
 pub enum StreamId {
