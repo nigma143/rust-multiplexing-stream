@@ -4,7 +4,7 @@ Example reverse access proxy
 ```
                DMZ                            |            INTRANET                               
                                               |                                      
-clients (tls-socket)===> reverse-access-proxy <===(multiplexor-over-socket) reverse-proxy
+clients (tls-socket)===> reverse-access-proxy <===(multiplexor-over-socket) proxy
                                               |                              
 ```
 
